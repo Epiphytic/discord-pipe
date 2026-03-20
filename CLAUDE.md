@@ -1,25 +1,32 @@
 # discord-pipe
 
-Generic CLI output batcher that collates chatty stdout/stderr to Discord webhooks.
+Single-binary Rust CLI that batches stdin or file-tail output and posts it to Discord webhooks.
 
-## Problem
-Long-running CLI tools (jcode, cargo build, tests, deployments) produce output faster than Discord's 5 req/s rate limit. Naively piping causes 429s and dropped messages.
+## What it does
+- Reads from stdin (pipe mode) or tails a file (`--follow`)
+- Batches output by time window, line count, and character count
+- Posts to Discord webhooks with rate limiting (token bucket + header sync + 429 retry)
+- Supports code block and embed output formats
+- Strips ANSI escape codes by default
 
-## Goal
-A Rust binary (and optionally WASM component) that:
-- Reads from stdin, a named pipe, or a file (tail mode)
-- Batches output by time window AND line count
-- Respects Discord rate limits
-- Posts to a Discord webhook with configurable formatting
-- Can be invoked generically: `my-cli 2>&1 | discord-pipe --webhook $URL --tag "cargo build"`
+## Build & test
+```bash
+cargo build --release
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+```
+
+## Usage
+```bash
+my-cli 2>&1 | discord-pipe --webhook $DISCORD_WEBHOOK_URL --tag "my-build"
+```
 
 ## Non-goals
-- No Discord bot token (webhook only, simpler auth)
+- No Discord bot token (webhook only)
 - No message editing/threading (append-only)
-- Not jcode-specific
+- Not tied to any specific CLI tool
 
 ## Constraints
 - Single binary, no runtime deps
-- WASM variant: reads stdin only, uses wasi:http for Discord calls
-- Config via CLI flags + optional .env / env vars
-- Apache 2.0 or MIT license
+- Config via CLI flags + env vars + .env file
+- MIT OR Apache-2.0 license
