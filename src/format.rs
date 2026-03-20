@@ -61,6 +61,53 @@ pub fn overhead_chars(tag: &str, format: &str) -> usize {
     }
 }
 
+pub fn split_content(content: &str, max_chars: usize, max_messages: usize) -> Vec<String> {
+    if content.chars().count() <= max_chars {
+        return vec![content.to_string()];
+    }
+
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for line in &lines {
+        let candidate = if current.is_empty() {
+            line.to_string()
+        } else {
+            format!("{current}\n{line}")
+        };
+
+        if candidate.chars().count() > max_chars {
+            if !current.is_empty() {
+                chunks.push(current);
+                current = line.to_string();
+            } else {
+                chunks.push(line.chars().take(max_chars).collect());
+                current = String::new();
+            }
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.len() <= max_messages {
+        return chunks;
+    }
+
+    let first = chunks.first().unwrap().clone();
+    let last = chunks.last().unwrap().clone();
+    let omitted_lines: usize = chunks[1..chunks.len() - 1]
+        .iter()
+        .map(|c| c.split('\n').count())
+        .sum();
+    let middle = format!("... ({omitted_lines} lines omitted)");
+
+    vec![first, middle, last]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +164,40 @@ mod tests {
         let json = format_embed("test", "tag", "ts");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["embeds"][0]["color"], 3066993);
+    }
+
+    #[test]
+    fn split_within_limit_returns_single_chunk() {
+        let chunks = split_content("short text", 1800, 3);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "short text");
+    }
+
+    #[test]
+    fn split_oversized_into_multiple_chunks() {
+        let content = "a\n".repeat(100); // 200 chars across 100 lines
+        let chunks = split_content(&content, 50, 3);
+        assert!(chunks.len() > 1);
+        assert!(chunks.len() <= 3);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 50);
+        }
+    }
+
+    #[test]
+    fn split_truncates_middle_when_exceeding_max_messages() {
+        let content = "line\n".repeat(500); // way too long for 3 msgs
+        let chunks = split_content(&content, 50, 3);
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks[1].contains("omitted") || chunks[1].contains("truncated"));
+    }
+
+    #[test]
+    fn split_preserves_line_boundaries() {
+        let content = "aaaa\nbbbb\ncccc\ndddd";
+        let chunks = split_content(&content, 10, 3);
+        for chunk in &chunks {
+            assert!(!chunk.starts_with('\n'));
+        }
     }
 }
