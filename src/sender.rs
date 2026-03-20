@@ -59,7 +59,7 @@ pub enum Format {
     Embed,
 }
 
-fn timestamp_now() -> String {
+pub fn timestamp_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -108,6 +108,7 @@ pub fn build_webhook_payload(
     }
 }
 
+#[cfg(test)]
 pub fn build_webhook_payload_seq(
     content: &str,
     tag: &str,
@@ -128,6 +129,7 @@ pub struct HttpResponse {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum SendError {
     RateLimited,
     Permanent(u16),

@@ -15,6 +15,7 @@ pub struct LineReader<R: BufRead> {
 }
 
 impl<R: BufRead> LineReader<R> {
+    #[allow(dead_code)]
     pub fn new(reader: R) -> Self {
         Self {
             reader,

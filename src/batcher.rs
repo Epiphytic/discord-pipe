@@ -35,10 +35,12 @@ impl BatchBuffer {
         self.lines.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
 
+    #[allow(dead_code)]
     pub fn char_count(&self) -> usize {
         self.char_count
     }
