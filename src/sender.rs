@@ -1,3 +1,4 @@
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::format::{format_code_block, format_embed};
@@ -119,6 +120,131 @@ pub fn build_webhook_payload_seq(
     build_webhook_payload(content, &seq_tag, format, username)
 }
 
+pub struct HttpResponse {
+    pub status: u16,
+    pub rate_limit_remaining: Option<u32>,
+    pub rate_limit_reset_after: Option<f64>,
+    pub retry_after: Option<f64>,
+}
+
+#[derive(Debug)]
+pub enum SendError {
+    RateLimited,
+    Permanent(u16),
+    Transient(String),
+    Network(String),
+}
+
+pub trait HttpPoster {
+    fn post(&self, url: &str, body: &str) -> Result<HttpResponse, SendError>;
+}
+
+pub struct UreqPoster;
+
+impl HttpPoster for UreqPoster {
+    fn post(&self, url: &str, body: &str) -> Result<HttpResponse, SendError> {
+        let response = ureq::post(url)
+            .header("Content-Type", "application/json")
+            .send(body)
+            .map_err(|e: ureq::Error| SendError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+
+        let header_str = |name: &str| -> Option<String> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        };
+
+        let rate_limit_remaining = header_str("X-RateLimit-Remaining").and_then(|v| v.parse().ok());
+
+        let rate_limit_reset_after =
+            header_str("X-RateLimit-Reset-After").and_then(|v| v.parse().ok());
+
+        let retry_after = header_str("Retry-After").and_then(|v| v.parse().ok());
+
+        Ok(HttpResponse {
+            status,
+            rate_limit_remaining,
+            rate_limit_reset_after,
+            retry_after,
+        })
+    }
+}
+
+pub struct Sender<P: HttpPoster> {
+    pub poster: P,
+    url: String,
+    bucket: TokenBucket,
+}
+
+const MAX_RETRIES: usize = 3;
+
+impl<P: HttpPoster> Sender<P> {
+    pub fn new(poster: P, url: &str, bucket: TokenBucket) -> Self {
+        Self {
+            poster,
+            url: url.to_string(),
+            bucket,
+        }
+    }
+
+    pub fn send_batch(
+        &mut self,
+        content: &str,
+        tag: &str,
+        format: Format,
+        username: Option<&str>,
+    ) -> Result<(), SendError> {
+        let payload = build_webhook_payload(content, tag, format, username);
+
+        let wait = self.bucket.wait_duration();
+        if !wait.is_zero() {
+            thread::sleep(wait);
+        }
+        self.bucket.try_acquire();
+
+        let mut retries = 0;
+        loop {
+            let resp = self.poster.post(&self.url, &payload)?;
+
+            if let (Some(remaining), Some(reset_after)) =
+                (resp.rate_limit_remaining, resp.rate_limit_reset_after)
+            {
+                self.bucket.sync_from_headers(remaining, reset_after);
+            }
+
+            match resp.status {
+                200..=299 => return Ok(()),
+                429 => {
+                    let wait = resp.retry_after.unwrap_or(1.0);
+                    thread::sleep(Duration::from_secs_f64(wait));
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        return Err(SendError::RateLimited);
+                    }
+                }
+                s @ 500..=599 => {
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        return Err(SendError::Transient(format!("server error: {s}")));
+                    }
+                    let backoff = Duration::from_secs(1 << (retries - 1));
+                    thread::sleep(backoff);
+                }
+                s @ 400..=499 => {
+                    return Err(SendError::Permanent(s));
+                }
+                s => {
+                    return Err(SendError::Transient(format!("unexpected status: {s}")));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +282,129 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
         let content = parsed["content"].as_str().unwrap();
         assert!(content.contains("[2/3]"));
+    }
+
+    struct MockPoster {
+        responses: std::cell::RefCell<Vec<HttpResponse>>,
+        call_count: std::cell::Cell<usize>,
+    }
+
+    impl MockPoster {
+        fn new(responses: Vec<HttpResponse>) -> Self {
+            Self {
+                responses: std::cell::RefCell::new(responses),
+                call_count: std::cell::Cell::new(0),
+            }
+        }
+        fn call_count(&self) -> usize {
+            self.call_count.get()
+        }
+    }
+
+    impl HttpPoster for MockPoster {
+        fn post(&self, _url: &str, _body: &str) -> Result<HttpResponse, SendError> {
+            self.call_count.set(self.call_count.get() + 1);
+            if self.responses.borrow().is_empty() {
+                return Err(SendError::Network("no more responses".into()));
+            }
+            Ok(self.responses.borrow_mut().remove(0))
+        }
+    }
+
+    fn test_bucket() -> TokenBucket {
+        TokenBucket::new(5, Duration::from_millis(100))
+    }
+
+    #[test]
+    fn sender_posts_successfully() {
+        let mock = MockPoster::new(vec![HttpResponse {
+            status: 204,
+            rate_limit_remaining: None,
+            rate_limit_reset_after: None,
+            retry_after: None,
+        }]);
+        let mut sender = Sender::new(mock, "https://webhook.url", test_bucket());
+        let result = sender.send_batch("content", "tag", Format::Code, None);
+        assert!(result.is_ok());
+        assert_eq!(sender.poster.call_count(), 1);
+    }
+
+    #[test]
+    fn sender_retries_on_429() {
+        let mock = MockPoster::new(vec![
+            HttpResponse {
+                status: 429,
+                retry_after: Some(0.01),
+                rate_limit_remaining: None,
+                rate_limit_reset_after: None,
+            },
+            HttpResponse {
+                status: 204,
+                rate_limit_remaining: None,
+                rate_limit_reset_after: None,
+                retry_after: None,
+            },
+        ]);
+        let mut sender = Sender::new(mock, "https://webhook.url", test_bucket());
+        let result = sender.send_batch("content", "tag", Format::Code, None);
+        assert!(result.is_ok());
+        assert_eq!(sender.poster.call_count(), 2);
+    }
+
+    #[test]
+    fn sender_retries_on_5xx_up_to_3_times() {
+        let mock = MockPoster::new(vec![
+            HttpResponse {
+                status: 500,
+                rate_limit_remaining: None,
+                rate_limit_reset_after: None,
+                retry_after: None,
+            },
+            HttpResponse {
+                status: 502,
+                rate_limit_remaining: None,
+                rate_limit_reset_after: None,
+                retry_after: None,
+            },
+            HttpResponse {
+                status: 503,
+                rate_limit_remaining: None,
+                rate_limit_reset_after: None,
+                retry_after: None,
+            },
+        ]);
+        let mut sender = Sender::new(mock, "https://webhook.url", test_bucket());
+        let result = sender.send_batch("content", "tag", Format::Code, None);
+        assert!(result.is_err());
+        assert_eq!(sender.poster.call_count(), 3);
+    }
+
+    #[test]
+    fn sender_does_not_retry_on_401() {
+        let mock = MockPoster::new(vec![HttpResponse {
+            status: 401,
+            rate_limit_remaining: None,
+            rate_limit_reset_after: None,
+            retry_after: None,
+        }]);
+        let mut sender = Sender::new(mock, "https://webhook.url", test_bucket());
+        let result = sender.send_batch("content", "tag", Format::Code, None);
+        assert!(result.is_err());
+        assert_eq!(sender.poster.call_count(), 1);
+    }
+
+    #[test]
+    fn sender_syncs_rate_limit_from_headers() {
+        let mock = MockPoster::new(vec![HttpResponse {
+            status: 204,
+            rate_limit_remaining: Some(1),
+            rate_limit_reset_after: Some(1.5),
+            retry_after: None,
+        }]);
+        let mut sender = Sender::new(mock, "https://webhook.url", test_bucket());
+        sender
+            .send_batch("content", "tag", Format::Code, None)
+            .unwrap();
     }
 
     #[test]
