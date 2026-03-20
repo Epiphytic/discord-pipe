@@ -1,0 +1,96 @@
+use std::time::{Duration, Instant};
+
+pub struct TokenBucket {
+    capacity: u32,
+    tokens: u32,
+    refill_period: Duration,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    pub fn new(capacity: u32, refill_period: Duration) -> Self {
+        Self {
+            capacity,
+            tokens: capacity,
+            refill_period,
+            last_refill: Instant::now(),
+        }
+    }
+
+    pub fn try_acquire(&mut self) -> bool {
+        self.refill();
+        if self.tokens > 0 {
+            self.tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn wait_duration(&self) -> Duration {
+        if self.tokens > 0 {
+            return Duration::ZERO;
+        }
+        let elapsed = self.last_refill.elapsed();
+        self.refill_period.saturating_sub(elapsed)
+    }
+
+    pub fn sync_from_headers(&mut self, remaining: u32, reset_after: f64) {
+        self.tokens = remaining.min(self.capacity);
+        self.last_refill = Instant::now();
+        self.refill_period = Duration::from_secs_f64(reset_after);
+    }
+
+    fn refill(&mut self) {
+        let elapsed = self.last_refill.elapsed();
+        if elapsed >= self.refill_period {
+            self.tokens = self.capacity;
+            self.last_refill = Instant::now();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn new_bucket_has_full_tokens() {
+        let mut bucket = TokenBucket::new(5, Duration::from_secs(2));
+        assert!(bucket.try_acquire());
+    }
+
+    #[test]
+    fn bucket_drains_after_capacity() {
+        let mut bucket = TokenBucket::new(5, Duration::from_secs(2));
+        for _ in 0..5 {
+            assert!(bucket.try_acquire());
+        }
+        assert!(!bucket.try_acquire());
+    }
+
+    #[test]
+    fn wait_duration_returns_zero_when_available() {
+        let bucket = TokenBucket::new(5, Duration::from_secs(2));
+        assert_eq!(bucket.wait_duration(), Duration::ZERO);
+    }
+
+    #[test]
+    fn wait_duration_returns_positive_when_empty() {
+        let mut bucket = TokenBucket::new(5, Duration::from_secs(2));
+        for _ in 0..5 {
+            bucket.try_acquire();
+        }
+        assert!(bucket.wait_duration() > Duration::ZERO);
+    }
+
+    #[test]
+    fn sync_from_headers_updates_remaining() {
+        let mut bucket = TokenBucket::new(5, Duration::from_secs(2));
+        bucket.sync_from_headers(2, 1.5);
+        assert!(bucket.try_acquire());
+        assert!(bucket.try_acquire());
+        assert!(!bucket.try_acquire());
+    }
+}
