@@ -51,6 +51,19 @@ echo "test" | discord-pipe --webhook $URL --dry-run
 my-cli | discord-pipe --webhook $URL --format embed
 ```
 
+### NDJSON mode (for jcode and similar tools)
+
+```bash
+jcode --ndjson task "build the feature" 2>&1 | discord-pipe --webhook $URL --ndjson --tag "jcode"
+```
+
+In NDJSON mode, discord-pipe parses each line as JSON and extracts text content from relevant event types. Tool calls and token usage events are filtered by default. Non-JSON lines are passed through as plain text.
+
+```bash
+# Also show tool call events
+jcode --ndjson task "build" 2>&1 | discord-pipe --webhook $URL --ndjson --show-tool-calls
+```
+
 ### Using an environment variable
 
 ```bash
@@ -72,17 +85,19 @@ my-cli 2>&1 | discord-pipe
 | `--format <FMT>` | `code` | | Output format: `code` or `embed` |
 | `--username <NAME>` | *(none)* | | Discord webhook username override |
 | `--no-strip-ansi` | `false` | | Don't strip ANSI escape codes from output |
+| `--ndjson` | `false` | | Parse stdin as newline-delimited JSON events |
+| `--show-tool-calls` | `false` | | Show tool call events in NDJSON mode (filtered by default) |
 | `--dry-run` | `false` | | Print formatted output to stdout instead of posting |
 | `--quiet` | `false` | | Suppress status messages on stderr |
 
 ## How It Works
 
 ```
-stdin/file --> [Line Reader] --> [Batch Buffer] --> [Sender] --> Discord Webhook
-                   |                   |                |
-              strip ANSI        time window +      token bucket +
-              (default)        line count +       header sync +
-                              char count          retry on 429
+stdin/file --> [Line Reader] --> [NDJSON Filter?] --> [Batch Buffer] --> [Sender] --> Discord Webhook
+                   |                   |                     |                |
+              strip ANSI         extract text           time window +      token bucket +
+              (default)         filter noise           line count +       header sync +
+                              (--ndjson mode)          char count          retry on 429
 ```
 
 ### Batching strategy
@@ -105,6 +120,18 @@ If a flushed batch exceeds Discord's 2000-character message limit, it is split i
 ### ANSI stripping
 
 By default, ANSI escape codes (colors, bold, cursor movement) are stripped from input. Use `--no-strip-ansi` to preserve them.
+
+### NDJSON parsing
+
+When `--ndjson` is set, each input line is parsed as JSON. The parser:
+
+- **Extracts text** from events with `"type": "text"` (from `content` or `text` fields)
+- **Filters out** `tool_call`, `tool_result`, `token_usage`, `usage`, and `stats` events
+- **Passes through** error events as `[error: message]`
+- **Falls back** to plain text for non-JSON lines (graceful degradation)
+- **Shows tool calls** when `--show-tool-calls` is set (as `[tool: name]`)
+
+This is designed for tools like [jcode](https://github.com/1jehuang/jcode) that emit NDJSON event streams.
 
 ## Environment Variables
 
