@@ -116,11 +116,12 @@ fn dry_run_tails_file() {
 }
 
 #[test]
-fn ndjson_mode_extracts_text_events() {
+fn ndjson_mode_extracts_assistant_text() {
     let input = [
-        r#"{"type":"text","content":"Hello from jcode"}"#,
-        r#"{"type":"tool_call","name":"read","content":"reading file"}"#,
-        r#"{"type":"text","content":"Build succeeded"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from jcode"}]}}"#,
+        r#"{"type":"tool_use","name":"file_read","input":{"file_path":"src/main.rs"}}"#,
+        r#"{"type":"tool_result","content":"file contents here"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Build succeeded"}]}}"#,
         r#"{"type":"token_usage","input":100,"output":50}"#,
     ]
     .join("\n")
@@ -154,15 +155,19 @@ fn ndjson_mode_extracts_text_events() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("Hello from jcode"),
-        "should contain text event: {stdout}"
+        "should contain assistant text: {stdout}"
     );
     assert!(
         stdout.contains("Build succeeded"),
-        "should contain second text event: {stdout}"
+        "should contain second assistant text: {stdout}"
     );
     assert!(
-        !stdout.contains("tool_call"),
-        "should filter tool calls: {stdout}"
+        !stdout.contains("file_read"),
+        "should filter tool_use: {stdout}"
+    );
+    assert!(
+        !stdout.contains("tool_result"),
+        "should filter tool_result: {stdout}"
     );
     assert!(
         !stdout.contains("token_usage"),
@@ -171,11 +176,12 @@ fn ndjson_mode_extracts_text_events() {
 }
 
 #[test]
-fn ndjson_mode_shows_tool_calls_when_flag_set() {
+fn ndjson_mode_shows_tool_calls_with_wrench_emoji() {
     let input = [
-        r#"{"type":"text","content":"Starting"}"#,
-        r#"{"type":"tool_call","name":"grep"}"#,
-        r#"{"type":"text","content":"Done"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Starting"}]}}"#,
+        r#"{"type":"tool_use","name":"grep","input":{"pattern":"TODO","path":"src/"}}"#,
+        r#"{"type":"tool_result","content":"found 3 matches"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}"#,
     ]
     .join("\n")
         + "\n";
@@ -205,17 +211,29 @@ fn ndjson_mode_shows_tool_calls_when_flag_set() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Starting"), "stdout was: {stdout}");
     assert!(
-        stdout.contains("[tool: grep]"),
-        "should show tool call: {stdout}"
+        stdout.contains("Starting"),
+        "should contain assistant text: {stdout}"
     );
-    assert!(stdout.contains("Done"), "stdout was: {stdout}");
+    assert!(stdout.contains("grep"), "should show tool name: {stdout}");
+    assert!(
+        stdout.contains("\u{1f527}"),
+        "should have wrench emoji: {stdout}"
+    );
+    assert!(stdout.contains("TODO"), "should show tool args: {stdout}");
+    assert!(
+        stdout.contains("Done"),
+        "should contain second assistant text: {stdout}"
+    );
+    assert!(
+        !stdout.contains("tool_result"),
+        "should still filter tool_result: {stdout}"
+    );
 }
 
 #[test]
-fn ndjson_mode_handles_mixed_json_and_plain_text() {
-    let input = "plain text line\n{\"type\":\"text\",\"content\":\"json text\"}\nnot json either\n";
+fn ndjson_mode_handles_plain_text_lines() {
+    let input = "Just plain text\nAnother line\n";
 
     let output = Command::new(env!("CARGO_BIN_EXE_discord-pipe"))
         .args([
@@ -242,15 +260,54 @@ fn ndjson_mode_handles_mixed_json_and_plain_text() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("plain text line"),
-        "should pass plain text: {stdout}"
+        stdout.contains("Just plain text"),
+        "should pass through plain text: {stdout}"
     );
     assert!(
-        stdout.contains("json text"),
-        "should extract json text: {stdout}"
+        stdout.contains("Another line"),
+        "should pass through all plain text: {stdout}"
+    );
+}
+
+#[test]
+fn ndjson_backward_compat_text_type() {
+    let input = [
+        r#"{"type":"text","content":"Legacy text format"}"#,
+        r#"{"type":"text","text":"Also legacy"}"#,
+    ]
+    .join("\n")
+        + "\n";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_discord-pipe"))
+        .args([
+            "--webhook",
+            "https://discord.com/api/webhooks/fake/fake",
+            "--dry-run",
+            "--ndjson",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Legacy text format"),
+        "should handle content field: {stdout}"
     );
     assert!(
-        stdout.contains("not json either"),
-        "should pass non-json: {stdout}"
+        stdout.contains("Also legacy"),
+        "should handle text field: {stdout}"
     );
 }
