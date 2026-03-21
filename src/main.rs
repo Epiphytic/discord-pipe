@@ -7,6 +7,7 @@ use clap::Parser;
 mod ansi;
 mod batcher;
 mod format;
+mod ndjson;
 mod reader;
 mod sender;
 
@@ -48,6 +49,12 @@ pub struct Cli {
 
     #[arg(long)]
     pub no_strip_ansi: bool,
+
+    #[arg(long)]
+    pub ndjson: bool,
+
+    #[arg(long)]
+    pub show_tool_calls: bool,
 
     #[arg(long)]
     pub dry_run: bool,
@@ -228,17 +235,35 @@ fn main() {
     } else {
         let stdin = std::io::stdin();
         let line_reader = reader::LineReader::with_ansi_strip(stdin.lock(), strip_ansi);
-        for line in line_reader {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            batch.push_line(&line);
-            if batch.should_flush() || last_flush.elapsed() >= window {
-                let content = batch.drain();
-                if batch_tx.send(content).is_err() {
+
+        if cli.ndjson {
+            let ndjson_iter = ndjson::NdjsonFilter::new(line_reader, cli.show_tool_calls);
+            for line in ndjson_iter {
+                if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
-                last_flush = Instant::now();
+                batch.push_line(&line);
+                if batch.should_flush() || last_flush.elapsed() >= window {
+                    let content = batch.drain();
+                    if batch_tx.send(content).is_err() {
+                        break;
+                    }
+                    last_flush = Instant::now();
+                }
+            }
+        } else {
+            for line in line_reader {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                batch.push_line(&line);
+                if batch.should_flush() || last_flush.elapsed() >= window {
+                    let content = batch.drain();
+                    if batch_tx.send(content).is_err() {
+                        break;
+                    }
+                    last_flush = Instant::now();
+                }
             }
         }
     }
@@ -296,6 +321,8 @@ mod tests {
             "--username",
             "BuildBot",
             "--no-strip-ansi",
+            "--ndjson",
+            "--show-tool-calls",
             "--dry-run",
             "--quiet",
         ])
@@ -308,6 +335,8 @@ mod tests {
         assert_eq!(cli.format, CliFormat::Embed);
         assert_eq!(cli.username.as_deref(), Some("BuildBot"));
         assert!(cli.no_strip_ansi);
+        assert!(cli.ndjson);
+        assert!(cli.show_tool_calls);
         assert!(cli.dry_run);
         assert!(cli.quiet);
     }
@@ -343,6 +372,8 @@ mod tests {
         assert_eq!(cli.max_messages, 3);
         assert_eq!(cli.format, CliFormat::Code);
         assert!(!cli.no_strip_ansi);
+        assert!(!cli.ndjson);
+        assert!(!cli.show_tool_calls);
         assert!(!cli.dry_run);
         assert!(!cli.quiet);
     }
